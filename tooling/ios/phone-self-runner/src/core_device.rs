@@ -538,14 +538,17 @@ async fn run(mut config: Config, callback: EventCallback, handle: u64, control: 
     let lockdown = async {
         let mut client = idevice::lockdown::LockdownClient::connect_rsd(&mut tunnel.adapter, &mut tunnel.handshake).await.map_err(|_| SERVICE)?;
         let version = client.get_value(Some("ProductVersion"), None).await.map_err(|_| SERVICE)?;
-        if version.as_string().is_none() { return Err(PROTOCOL); }
-        Ok::<_, Failure>(())
+        let Some(version) = version.as_string() else { return Err(PROTOCOL); };
+        Ok::<_, Failure>(supports_remote_input(version))
     };
     let checked = tokio::select! { biased;
         _ = cancelled(&mut stopped) => { completion.stopped = true; Err(CANCELLED) },
         result = tokio::time::timeout(Duration::from_secs(20), lockdown) => result.unwrap_or(Err(SERVICE)),
     };
-    if let Err(error) = checked { completion.error = Some(error); return completion; }
+    let remote_input = match checked {
+        Ok(remote_input) => remote_input,
+        Err(error) => { completion.error = Some(error); return completion; }
+    };
     emit_event(callback, handle, &config.run_id, 0, json!({"stage":"lockdown","lockdownReady":true}));
     emit_event(callback, handle, &config.run_id, 0, json!({"stage":"services"}));
     let submitted = AtomicBool::new(false);
@@ -571,7 +574,7 @@ async fn run(mut config: Config, callback: EventCallback, handle: u64, control: 
     if matches!(prepared, Ok(true)) {
         emit_event(callback, handle, &config.run_id, 5, json!({"stage":"refreshingServices","ddiMounted":true}));
     }
-    let mut session = Session::new(tunnel);
+    let mut session = Session::new(tunnel, remote_input);
     let probe = tokio::select! {
         biased;
         _ = cancelled(&mut stopped) => { completion.stopped = true; Err(CANCELLED) },
@@ -687,9 +690,14 @@ impl Frame {
     }
 }
 struct KeyboardLease { client: UniversalHidServiceClient<Box<dyn ReadWrite>>, service: MainKeyboardService }
+fn supports_remote_input(version: &str) -> bool {
+    ddi::major_version(version).is_some_and(|major| major >= 27)
+}
+
 struct TouchLease { client: UniversalHidServiceClient<Box<dyn ReadWrite>>, x: u16, y: u16 }
 struct Session {
     tunnel: Tunnel,
+    remote_input: bool,
     frame: Option<Frame>,
     media: media::OwnedMedia,
     keyboard: Option<KeyboardLease>,
@@ -698,8 +706,8 @@ struct Session {
     home: Option<IndigoHidClient<Box<dyn ReadWrite>>>,
 }
 impl Session {
-    fn new(tunnel: Tunnel) -> Self {
-        Self { tunnel, frame: None, media: media::OwnedMedia::new(), keyboard: None,
+    fn new(tunnel: Tunnel, remote_input: bool) -> Self {
+        Self { tunnel, remote_input, frame: None, media: media::OwnedMedia::new(), keyboard: None,
             keyboard_unknown: false, touch: None, home: None }
     }
     async fn orientation(&mut self) -> Result<u8, Failure> {
@@ -725,7 +733,9 @@ impl Session {
             ScreenshotClient::new(&mut client).await.map_err(|_| SERVICE)?;
         } else { return Err(SERVICE); }
         AppServiceClient::connect_rsd(&mut self.tunnel.adapter, &mut self.tunnel.handshake).await.map_err(|_| SERVICE)?;
-        let input = if self.tunnel.handshake.services.contains_key(HID) && self.tunnel.handshake.services.contains_key(DISPLAY) {
+        // Apple's CoreDevice remote input media stream rejects devices below iOS/iPadOS 27.0
+        // (CoreDeviceError 9021) even when HID/displayservice probe succeeds.
+        let input = if self.remote_input && self.tunnel.handshake.services.contains_key(HID) && self.tunnel.handshake.services.contains_key(DISPLAY) {
             let probe = async {
                 let mut hid = UniversalHidServiceClient::connect_rsd(&mut self.tunnel.adapter, &mut self.tunnel.handshake).await.map_err(|_| SERVICE)?;
                 hid.list_connected_services().await.map_err(|_| PROTOCOL)?;
@@ -749,6 +759,7 @@ impl Session {
                 // screen/control sharing. It is never an MCP/raw HID tool and
                 // never part of a settings check or a DDI mount probe.
                 self.frame = None;
+                if !self.remote_input { return Err(SERVICE); }
                 self.media.prepare(&mut self.tunnel, acted).await?;
                 let changed = acted.load(Ordering::Acquire);
                 return Ok(Payload { metadata: json!({"kind":"prepareInput",
@@ -1681,5 +1692,15 @@ mod tests {
         drop(events);
         assert!(owner().lock().unwrap().is_none());
         assert_eq!(request(handle, 1, json!({"op":"apps"}), result), STALE);
+    }
+
+    #[test]
+    fn remote_input_requires_ios_27_or_later() {
+        for value in ["", "16.9", "17.0", "18.5", "26.0", "26.4.1", "27.beta", "27.0.0.1"] {
+            assert!(!supports_remote_input(value), "{value}");
+        }
+        for value in ["27", "27.0", "27.2", "27.2.1", "28.0"] {
+            assert!(supports_remote_input(value), "{value}");
+        }
     }
 }
