@@ -183,7 +183,7 @@ fn load(cache: Option<&DdiCache>, variant: Variant) -> Result<Assets, Failure> {
     Ok(Assets { manifest, image, trust_cache, info, root_hash })
 }
 
-fn major_version(value: &str) -> Option<u32> {
+pub(crate) fn major_version(value: &str) -> Option<u32> {
     let parts: Vec<_> = value.split('.').collect();
     if parts.is_empty() || parts.len() > 3 || parts.iter().any(|s| s.is_empty() || !s.bytes().all(|c| c.is_ascii_digit())) {
         return None;
