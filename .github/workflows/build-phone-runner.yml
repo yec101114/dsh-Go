@@ -1,0 +1,64 @@
+name: Build PhoneRunner Unsigned IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id_prefix:
+        description: PRODUCT_BUNDLE_IDENTIFIER for PhoneRunnerUITests
+        required: true
+        default: io.github.yec101114.dshgo.PhoneRunner
+  push:
+    paths:
+      - '.github/workflows/build-phone-runner.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-phone-runner:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build PhoneRunnerUITests-Runner.app (unsigned)
+        run: |
+          test -f app/ios/Flutter/Generated.xcconfig || touch app/ios/Flutter/Generated.xcconfig
+          BUNDLE_ID="${{ github.event.inputs.bundle_id_prefix || 'io.github.yec101114.dshgo.PhoneRunner' }}"
+          xcodebuild build-for-testing \
+            -project app/ios/Runner.xcodeproj \
+            -scheme PhoneRunner \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/derived" \
+            ONLY_ACTIVE_ARCH=NO \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            "CODE_SIGN_ENTITLEMENTS=PhoneRunner/PhoneRunnerSelf.entitlements" \
+            "PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_ID"
+
+      - name: Package PhoneRunner-unsigned.ipa and inspect
+        run: |
+          RUNNER="$(find "$RUNNER_TEMP/derived/Build/Products" -maxdepth 3 -name 'PhoneRunnerUITests-Runner.app' -type d | head -n 1)"
+          test -d "$RUNNER"
+          echo "Found runner: $RUNNER"
+          ls -la "$RUNNER"
+          ls -la "$RUNNER/PlugIns"
+          plutil -p "$RUNNER/Info.plist"
+          plutil -p "$RUNNER/PlugIns/PhoneRunnerUITests.xctest/Info.plist"
+          lipo -archs "$RUNNER/PhoneRunnerUITests-Runner"
+          lipo -archs "$RUNNER/PlugIns/PhoneRunnerUITests.xctest/PhoneRunnerUITests"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$RUNNER" "$RUNNER_TEMP/ipa/Payload/"
+          find "$RUNNER_TEMP/ipa/Payload" -name '.DS_Store' -delete
+          (cd "$RUNNER_TEMP/ipa" && /usr/bin/ditto -c -k --keepParent Payload "$RUNNER_TEMP/PhoneRunner-unsigned.ipa")
+          shasum -a 256 "$RUNNER_TEMP/PhoneRunner-unsigned.ipa"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: PhoneRunner-unsigned-ipa
+          path: ${{ runner.temp }}/PhoneRunner-unsigned.ipa
