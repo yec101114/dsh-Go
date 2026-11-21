@@ -28,6 +28,20 @@ jobs:
       - name: Build PhoneRunnerUITests-Runner.app (unsigned)
         run: |
           test -f app/ios/Flutter/Generated.xcconfig || touch app/ios/Flutter/Generated.xcconfig
+          PKG_DIR="app/ios/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage"
+          if [ ! -f "$PKG_DIR/Package.swift" ]; then
+            mkdir -p "$PKG_DIR/Sources"
+            printf '%s\n' \
+              '// swift-tools-version: 5.9' \
+              'import PackageDescription' \
+              'let package = Package(' \
+              '    name: "FlutterGeneratedPluginSwiftPackage",' \
+              '    platforms: [.iOS(.v13)],' \
+              '    products: [.library(name: "FlutterGeneratedPluginSwiftPackage", targets: ["FlutterGeneratedPluginSwiftPackage"])],' \
+              '    targets: [.target(name: "FlutterGeneratedPluginSwiftPackage", path: "Sources")]' \
+              ')' > "$PKG_DIR/Package.swift"
+            printf '// stub\n' > "$PKG_DIR/Sources/Stub.swift"
+          fi
           BUNDLE_ID="${{ github.event.inputs.bundle_id_prefix || 'io.github.yec101114.dshgo.PhoneRunner' }}"
           xcodebuild build-for-testing \
             -project app/ios/Runner.xcodeproj \
